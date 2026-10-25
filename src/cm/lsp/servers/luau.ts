@@ -81,9 +81,6 @@ export const luauServers: LspServerManifest[] = [
 			workspaceConfiguration: {
 				"luau-lsp": {},
 			},
-			builtinExtensions: {
-				formatting: false,
-			},
 		},
 	}),
 ];
