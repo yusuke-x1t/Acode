@@ -65,9 +65,6 @@ export const luaServers: LspServerManifest[] = [
 					},
 				},
 			},
-			builtinExtensions: {
-				formatting: false,
-			},
 		},
 		enabled: true,
 	}),
