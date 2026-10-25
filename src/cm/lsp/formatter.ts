@@ -30,6 +30,16 @@ function getActiveMetadata(
 	};
 }
 
+function getActiveLanguage(file: AcodeFile | undefined, metadata: FileMetadata | null): string {
+	return String(file?.currentMode || metadata?.languageId || metadata?.languageName || "")
+		.trim()
+		.toLowerCase();
+}
+
+function isLuaLike(language: string): boolean {
+	return language === "lua" || language === "luau";
+}
+
 export function registerLspFormatter(acode: AcodeApi): void {
 	const languages = new Set<string>();
 	serverRegistry.listServers().forEach((server) => {
@@ -38,10 +48,14 @@ export function registerLspFormatter(acode: AcodeApi): void {
 			if (lang) languages.add(String(lang));
 		});
 	});
-	const extensions = languages.size
-		? collectFormatterExtensions(languages)
-		: ["*"];
 
+	// lua-language-server and luau-lsp do not provide document formatting.
+	// Expose this formatter for both modes, then delegate those documents to
+	// StyLua rather than trying an LSP request that those servers cannot serve.
+	languages.add("lua");
+	languages.add("luau");
+
+	const extensions = collectFormatterExtensions(languages);
 	acode.registerFormatter(
 		"lsp",
 		extensions,
@@ -49,6 +63,13 @@ export function registerLspFormatter(acode: AcodeApi): void {
 			const manager = window.editorManager as EditorManagerWithLsp | undefined;
 			const file = manager?.activeFile;
 			const metadata = getActiveMetadata(manager, file);
+			const language = getActiveLanguage(file, metadata);
+
+			if (isLuaLike(language)) {
+				const { formatActiveFileWithStyLua } = await import("lib/styluaFormatter");
+				return formatActiveFileWithStyLua();
+			}
+
 			if (!metadata) {
 				toast("LSP formatter unavailable");
 				return false;
@@ -62,20 +83,19 @@ export function registerLspFormatter(acode: AcodeApi): void {
 				.getServersForLanguage(languageId)
 				.filter(supportsBuiltinFormatting);
 			if (!servers.length) {
-				toast("No LSP formatter available");
+				toast("No LSP formatter available for this language");
 				return false;
 			}
+
 			const fullMetadata = {
 				...metadata,
 				languageName: metadata.languageName || languageId,
 			};
 			const success = await lspClientManager.formatDocument(fullMetadata);
-			if (!success) {
-				toast("LSP formatter failed");
-			}
+			if (!success) toast("LSP formatter failed");
 			return success;
 		},
-		"Language Server",
+		"Language Server / StyLua",
 	);
 }
 
@@ -91,9 +111,7 @@ function collectFormatterExtensions(languages: Set<string>): string[] {
 				.toLowerCase();
 			if (key) modeMap.set(key, mode);
 		});
-	} catch (_) {
-		// Ignore mode loading errors
-	}
+	} catch (_) {}
 
 	languages.forEach((language) => {
 		const key = String(language ?? "")
@@ -107,15 +125,9 @@ function collectFormatterExtensions(languages: Set<string>): string[] {
 			.split("|")
 			.forEach((part) => {
 				const ext = part.trim();
-				if (ext && !ext.startsWith("^")) {
-					extensions.add(ext);
-				}
+				if (ext && !ext.startsWith("^")) extensions.add(ext);
 			});
 	});
 
-	if (!extensions.size) {
-		return ["*"];
-	}
-
-	return Array.from(extensions);
+	return extensions.size ? Array.from(extensions) : ["*"];
 }
