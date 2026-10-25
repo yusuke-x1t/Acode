@@ -32,6 +32,14 @@ function decodeDocId(value) {
 }
 
 function filenameFromUri(uri, fallback = "") {
+	if (/^content:/i.test(uri)) {
+		try {
+			const docId = decodeDocId(Uri.parse(uri)?.docId);
+			const leaf = docId.split("/").filter(Boolean).pop();
+			if (leaf) return leaf.split(":").pop() || leaf;
+		} catch {}
+	}
+
 	try {
 		const leaf = new URL(uri).pathname.split("/").filter(Boolean).pop();
 		if (leaf) return decodeURIComponent(leaf);
@@ -48,8 +56,12 @@ function safRelativePath(rootUri, fileUri) {
 		const rootId = decodeDocId(root.docId).replace(/\/+$/, "");
 		const fileId = decodeDocId(file.docId);
 		if (fileId === rootId) return "";
-		if (fileId.startsWith(`${rootId}/`)) {
-			return fileId.slice(rootId.length + 1).replace(/^\/+/, "");
+
+		// SAF volume roots often end in "primary:". Child IDs then continue
+		// immediately after the colon, without a slash (primary:folder/file.lua).
+		const prefix = rootId.endsWith(":") ? rootId : `${rootId}/`;
+		if (fileId.startsWith(prefix)) {
+			return fileId.slice(prefix.length).replace(/^\/+/, "");
 		}
 	} catch {}
 	return "";
@@ -65,10 +77,18 @@ async function getActualPath(rootUri, relativePath) {
 	}
 }
 
+function makeFallbackPath(filename, mode) {
+	const leaf = String(filename || `untitled.${mode}`)
+		.split(/[\\/]/)
+		.pop()
+		.replace(/[^A-Za-z0-9_.-]/g, "_");
+	return `/tmp/${leaf && LUA_FILE_RE.test(leaf) ? leaf : `untitled.${mode}`}`;
+}
+
 async function resolveStyLuaFilepath(file, mode) {
 	const uri = String(file.uri || "");
 	const directPath = decodePath(uri);
-	if (directPath) return directPath;
+	if (directPath) return { path: directPath, resolved: true };
 
 	const filename = String(file.filename || filenameFromUri(uri, `untitled.${mode}`));
 	const roots = Array.isArray(globalThis.addedFolder) ? globalThis.addedFolder : [];
@@ -76,18 +96,18 @@ async function resolveStyLuaFilepath(file, mode) {
 		.filter((item) => typeof item?.url === "string" && /^content:/i.test(item.url))
 		.sort((a, b) => String(b.url).length - String(a.url).length);
 
-	// Storage Access Framework URIs are virtual paths. Resolve the file relative
-	// to the opened workspace directory; passing a file URI as getPath's root
-	// does not work because that API expects a directory URI.
+	// Resolve a SAF document from its containing workspace directory. Passing a
+	// file URI as getPath's root is invalid: that API expects a directory URI
+	// and a path relative to that directory.
 	for (const root of contentRoots) {
 		const relativePath = safRelativePath(root.url, uri);
 		if (!relativePath || !LUA_FILE_RE.test(relativePath)) continue;
 		const actualPath = await getActualPath(root.url, relativePath);
-		if (actualPath) return actualPath;
+		if (actualPath) return { path: actualPath, resolved: true };
 	}
 
-	// If the file is not under an added workspace, attempt the SAF document's
-	// own tree URI as the root and use its document ID as the relative path.
+	// Also try the document's SAF tree URI if the file is outside an added
+	// workspace folder.
 	if (/^content:/i.test(uri)) {
 		try {
 			const parsed = Uri.parse(uri);
@@ -97,26 +117,27 @@ async function resolveStyLuaFilepath(file, mode) {
 			try {
 				const rootParsed = Uri.parse(rootUri);
 				const rootDocId = decodeDocId(rootParsed?.docId).replace(/\/+$/, "");
-				if (rootDocId && relativePath.startsWith(`${rootDocId}/`)) {
-					relativePath = relativePath.slice(rootDocId.length + 1);
+				if (rootDocId) {
+					const prefix = rootDocId.endsWith(":") ? rootDocId : `${rootDocId}/`;
+					if (relativePath.startsWith(prefix)) {
+						relativePath = relativePath.slice(prefix.length).replace(/^\/+/, "");
+					}
 				}
 			} catch {}
 			const actualPath = await getActualPath(rootUri, relativePath);
-			if (actualPath) return actualPath;
+			if (actualPath) return { path: actualPath, resolved: true };
 		} catch (error) {
 			console.warn("Could not resolve SAF path for StyLua:", error);
 		}
 	}
 
-	const location = String(file.location || "");
-	const locationPath = decodePath(location);
-	if (locationPath && LUA_FILE_RE.test(locationPath)) {
-		return locationPath;
-	}
+	const locationPath = decodePath(String(file.location || ""));
+	if (locationPath) return { path: locationPath, resolved: true };
 
-	throw new Error(
-		`StyLua could not resolve an absolute filesystem path for ${filename}. Open this file through its workspace folder so StyLua can find .stylua.toml or stylua.toml.`,
-	);
+	// A config file is optional. If Acode cannot expose an absolute OS path
+	// (for example, an unsupported SAF provider), format with StyLua defaults
+	// instead of blocking formatting or showing a misleading TOML error.
+	return { path: makeFallbackPath(filename, mode), resolved: false };
 }
 
 export async function formatActiveFileWithStyLua() {
@@ -136,8 +157,9 @@ export async function formatActiveFileWithStyLua() {
 	const source = state.doc.toString();
 
 	try {
-		const filepath = await resolveStyLuaFilepath(file, mode);
-		const command = `test -x ${quoteArg(STYLUA_BINARY)} && printf %s ${quoteArg(source)} | ${quoteArg(STYLUA_BINARY)} --search-parent-directories --stdin-filepath ${quoteArg(filepath)} -`;
+		const resolved = await resolveStyLuaFilepath(file, mode);
+		const searchParentDirectories = resolved.resolved ? "--search-parent-directories " : "";
+		const command = `test -x ${quoteArg(STYLUA_BINARY)} && printf %s ${quoteArg(source)} | ${quoteArg(STYLUA_BINARY)} ${searchParentDirectories}--stdin-filepath ${quoteArg(resolved.path)} -`;
 		const formatted = await runQuickCommand(command);
 
 		if (formatted === source) return true;
