@@ -36,6 +36,7 @@ interface LuaState {
 	forHeader: boolean;
 	forHeaderExpectName: boolean;
 	tableDepth: number;
+	localDeclaration: boolean;
 	docLine: boolean;
 	docExpectation: DocExpectation;
 }
@@ -390,6 +391,23 @@ function classifyIdentifier(word: string, state: LuaState, stream: StringStream)
 		}
 	}
 
+	if (!state.afterPropertyAccess && state.localDeclaration && word !== "self" &&
+		!/^\s*,/.test(stream.string.slice(stream.pos))) state.localDeclaration = false;
+
+	if (!state.afterPropertyAccess && (word === "_ENV" || word === "_G")) {
+		state.afterFunctionName = false;
+		state.lastStandardNamespace = null;
+		return "modifier";
+	}
+	if (!state.afterPropertyAccess && word === "self") {
+		const isAssignment = /^\s*=(?!=)/.test(stream.string.slice(stream.pos));
+		const isLocal = state.localDeclaration;
+		state.localDeclaration = false;
+		state.afterFunctionName = false;
+		state.lastStandardNamespace = null;
+		return isLocal || isAssignment ? "variableName" : "modifier";
+	}
+
 	if (state.expectFunctionName) {
 		const rest = stream.string.slice(stream.pos);
 		const isQualifiedFunctionName = /^\s*[.:]\s*[A-Za-z_]/.test(rest);
@@ -486,6 +504,7 @@ function classifyIdentifier(word: string, state: LuaState, stream: StringStream)
 	}
 
 	if (logicalKeywords.has(word) || modifierKeywords.has(word)) {
+		if (word === "local") state.localDeclaration = true;
 		state.afterFunctionName = false;
 		state.lastStandardNamespace = null;
 		return "modifier";
@@ -551,11 +570,6 @@ function classifyIdentifier(word: string, state: LuaState, stream: StringStream)
 		state.afterFunctionName = false;
 		state.lastStandardNamespace = null;
 		return "variableName.function";
-	}
-	if (word === "self") {
-		state.afterFunctionName = false;
-		state.lastStandardNamespace = null;
-		return "variableName";
 	}
 	if (isUpperConstant(word) && state.tableDepth === 0) {
 		state.afterFunctionName = false;
@@ -703,6 +717,7 @@ const normal: Tokenizer = (stream, state) => {
 	}
 	if (char === "," || char === ";") {
 		if (state.forHeader && char === ",") state.forHeaderExpectName = true;
+		if (char === ";") state.localDeclaration = false;
 		state.afterPropertyAccess = false;
 		state.afterFunctionName = false;
 		state.lastStandardNamespace = null;
@@ -733,6 +748,7 @@ const luaLanguage = StreamLanguage.define<LuaState>({
 			forHeader: false,
 			forHeaderExpectName: false,
 			tableDepth: 0,
+			localDeclaration: false,
 			docLine: false,
 			docExpectation: "none",
 		};
