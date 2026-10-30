@@ -277,7 +277,6 @@ function bracketed(level: number, style: string): Tokenizer {
 	};
 }
 
-
 function quotedString(quote: string): Tokenizer {
 	return (stream, state) => {
 		let escaped = false;
@@ -301,7 +300,6 @@ function quotedString(quote: string): Tokenizer {
 		return "string";
 	};
 }
-
 
 const interpolatedString: Tokenizer = (stream, state) => {
 	while (true) {
@@ -454,12 +452,27 @@ function classifyIdentifier(word: string, state: LuauState, stream: StringStream
 		return "modifier";
 	}
 	if (!state.afterPropertyAccess && !isTypeField && word === "self") {
-		const isAssignment = /^\s*=(?!=)/.test(stream.string.slice(stream.pos));
-		const isLocal = state.localDeclaration;
-		state.localDeclaration = false;
 		state.lastIdentifierWasStandard = false;
 		state.afterFunctionName = false;
 		state.afterTypeIdentifier = false;
+
+		if (state.forHeader && state.forHeaderExpectName) {
+			state.forHeaderExpectName = false;
+			state.localDeclaration = false;
+			return "variableName.special";
+		}
+		if (state.inFunctionParams) {
+			state.localDeclaration = false;
+			return "variableName.special";
+		}
+		if (state.tableDepth > 0) {
+			state.localDeclaration = false;
+			return "variableName";
+		}
+
+		const isAssignment = /^\s*=(?!=)/.test(stream.string.slice(stream.pos));
+		const isLocal = state.localDeclaration;
+		state.localDeclaration = false;
 		return isLocal || isAssignment ? "variableName" : "modifier";
 	}
 
