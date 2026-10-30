@@ -38,6 +38,7 @@ interface LuauState {
 	forHeader: boolean;
 	forHeaderExpectName: boolean;
 	tableDepth: number;
+	localDeclaration: boolean;
 }
 
 const controlKeywords = new Set([
@@ -402,8 +403,6 @@ function readNumber(stream: StringStream, firstChar: string) {
 }
 
 function classifyIdentifier(word: string, state: LuauState, stream: StringStream) {
-	// Recover from an incomplete top-level type annotation before styling a new statement.
-	// Reserved statement starters cannot be type names and must not inherit type coloring.
 	if (
 		state.inType &&
 		state.typeDepth === 0 &&
@@ -440,6 +439,28 @@ function classifyIdentifier(word: string, state: LuauState, stream: StringStream
 	) {
 		state.inFunctionParams = false;
 		state.functionParamsDepth = 0;
+	}
+
+	const isTypeField = state.inType && state.typeDepth > 0 && state.typeFieldExpected &&
+		state.typeTableDepths[state.typeTableDepths.length - 1] === state.typeDepth;
+
+	if (!state.afterPropertyAccess && !isTypeField && state.localDeclaration && word !== "self" &&
+		!/^\s*,/.test(stream.string.slice(stream.pos))) state.localDeclaration = false;
+
+	if (!state.afterPropertyAccess && !isTypeField && (word === "_ENV" || word === "_G")) {
+		state.lastIdentifierWasStandard = false;
+		state.afterFunctionName = false;
+		state.afterTypeIdentifier = false;
+		return "modifier";
+	}
+	if (!state.afterPropertyAccess && !isTypeField && word === "self") {
+		const isAssignment = /^\s*=(?!=)/.test(stream.string.slice(stream.pos));
+		const isLocal = state.localDeclaration;
+		state.localDeclaration = false;
+		state.lastIdentifierWasStandard = false;
+		state.afterFunctionName = false;
+		state.afterTypeIdentifier = false;
+		return isLocal || isAssignment ? "variableName" : "modifier";
 	}
 
 	if (state.forHeader && word === "in") {
@@ -589,6 +610,7 @@ function classifyIdentifier(word: string, state: LuauState, stream: StringStream
 		return "modifier";
 	}
 	if (modifierKeywords.has(word)) {
+		if (word === "local") state.localDeclaration = true;
 		state.lastIdentifierWasStandard = false;
 		state.afterFunctionName = false;
 		state.afterTypeIdentifier = false;
@@ -608,12 +630,6 @@ function classifyIdentifier(word: string, state: LuauState, stream: StringStream
 		state.afterTypeIdentifier = false;
 		state.lastIdentifierWasStandard = false;
 		return "controlKeyword";
-	}
-	if (word === "self") {
-		state.lastIdentifierWasStandard = false;
-		state.afterFunctionName = false;
-		state.afterTypeIdentifier = false;
-		return "variableName";
 	}
 	if (word === "true" || word === "false") {
 		state.lastIdentifierWasStandard = false;
@@ -909,6 +925,7 @@ const normal: Tokenizer = (stream, state) => {
 	}
 	if (char === "," || char === ";") {
 		if (state.forHeader && char === ",") state.forHeaderExpectName = true;
+		if (char === ";") state.localDeclaration = false;
 		if (
 			state.inType &&
 			state.typeDepth > 0 &&
@@ -959,6 +976,7 @@ const luauLanguage = StreamLanguage.define<LuauState>({
 			forHeader: false,
 			forHeaderExpectName: false,
 			tableDepth: 0,
+			localDeclaration: false,
 		};
 	},
 	copyState(state) {
